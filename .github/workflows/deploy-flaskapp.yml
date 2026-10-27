@@ -1,0 +1,92 @@
+name: Flask app CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Creating-Mini-Game-with-GitHub-Copilot/**"
+      - ".github/workflows/deploy-flaskapp.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Creating-Mini-Game-with-GitHub-Copilot/**"
+      - ".github/workflows/deploy-flaskapp.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: Creating-Mini-Game-with-GitHub-Copilot
+  PYTHON_VERSION: "3.13"
+  AZURE_WEBAPP_NAME: flaskapp
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: ${{ env.APP_DIR }}/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run tests
+        run: python -m pytest -v
+
+      - name: Package app
+        run: zip -q ../flaskapp.zip app.py requirements.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flaskapp
+          path: flaskapp.zip
+          retention-days: 7
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: flaskapp
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Remote Oryx build is enabled via the SCM_DO_BUILD_DURING_DEPLOYMENT app setting.
+      - id: deploy
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          package: flaskapp.zip
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "${{ steps.deploy.outputs.webapp-url }}")
+            [ "$code" = "200" ] && echo "App is up ($code)" && exit 0
+            echo "Attempt $i: HTTP $code, retrying in 30s..."
+            sleep 30
+          done
+          exit 1
